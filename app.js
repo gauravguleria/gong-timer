@@ -19,18 +19,19 @@
     repeat: 1,     // how many times the whole schedule runs
   };
 
-  // Gong voice: inharmonic partials [ratio, level, decay seconds]
+  // Synth gong (used only if no recording is found in sounds/gong.mp3).
+  // Deep fundamental, slow swelling attack, long warm decay, soft mallet thump.
+  // [ratio, level, decay seconds, attack seconds]
   const PARTIALS = [
-    [1.0, 1.0, 12.0],
-    [1.5, 0.55, 10.0],
-    [2.0, 0.45, 8.5],
-    [2.52, 0.3, 7.0],
-    [2.76, 0.28, 6.5],
-    [3.01, 0.22, 5.5],
-    [4.07, 0.16, 4.0],
-    [5.43, 0.10, 2.8],
+    [1.00, 1.00, 24, 0.10],
+    [1.42, 0.55, 20, 0.14],
+    [1.98, 0.40, 16, 0.18],
+    [2.61, 0.28, 13, 0.22],
+    [3.12, 0.20, 10, 0.26],
+    [3.95, 0.13, 8, 0.30],
+    [4.84, 0.08, 6, 0.34],
   ];
-  const BASE_HZ = 98;
+  const BASE_HZ = 62;
 
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -118,44 +119,73 @@
       const data = noise.getChannelData(0);
       for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
 
-      audio = { ctx, master, noise };
+      audio = { ctx, master, noise, sample: null };
+      // A real recording of your gong, if you add one at sounds/gong.mp3 in the repo.
+      loadSample(ctx).then((buf) => { if (audio) audio.sample = buf; });
     }
     if (audio.ctx.state === 'suspended') audio.ctx.resume().catch(() => {});
     audio.master.gain.setTargetAtTime(state.volume / 100, audio.ctx.currentTime, 0.02);
     return audio;
   }
 
+  async function loadSample(ctx) {
+    try {
+      const res = await fetch('sounds/gong.mp3', { cache: 'no-cache' });
+      if (!res.ok) return null;
+      return await ctx.decodeAudioData(await res.arrayBuffer());
+    } catch (_) {
+      return null;
+    }
+  }
+
   function strike(a, when, out) {
     const { ctx, noise } = a;
-    PARTIALS.forEach(([ratio, level, decay], i) => {
-      // two slightly detuned sines per partial give the slow shimmer of a real gong
-      for (const detune of [-1.1, 1.1]) {
+
+    // Prefer the recorded gong when it is present.
+    if (a.sample) {
+      const src = ctx.createBufferSource();
+      src.buffer = a.sample;
+      src.connect(out);
+      src.start(when);
+      return;
+    }
+
+    // Soft, warm lowpass so the tone never gets metallic or harsh.
+    const warm = ctx.createBiquadFilter();
+    warm.type = 'lowpass';
+    warm.frequency.value = 2400;
+    warm.Q.value = 0.4;
+    warm.connect(out);
+
+    PARTIALS.forEach(([ratio, level, decay, attack], i) => {
+      // two detuned sines per partial: the slow shimmer and swell of a real gong
+      for (const detune of [-0.7, 0.7]) {
         const osc = ctx.createOscillator();
         const env = ctx.createGain();
         osc.type = 'sine';
-        osc.frequency.value = BASE_HZ * ratio + detune;
+        osc.frequency.value = BASE_HZ * ratio + detune * (1 + i * 0.2);
         env.gain.setValueAtTime(0.0001, when);
-        env.gain.linearRampToValueAtTime(level * 0.18, when + 0.005 + i * 0.002);
+        env.gain.linearRampToValueAtTime(level * 0.12, when + attack);
         env.gain.exponentialRampToValueAtTime(0.0001, when + decay);
-        osc.connect(env).connect(out);
+        osc.connect(env).connect(warm);
         osc.start(when);
         osc.stop(when + decay + 0.05);
       }
     });
 
-    // short filtered noise burst = the strike
+    // soft mallet thump: a low, short noise burst
     const src = ctx.createBufferSource();
     src.buffer = noise;
     const band = ctx.createBiquadFilter();
     band.type = 'bandpass';
-    band.frequency.value = 1100;
-    band.Q.value = 0.8;
+    band.frequency.value = 380;
+    band.Q.value = 0.6;
     const env = ctx.createGain();
-    env.gain.setValueAtTime(0.35, when);
-    env.gain.exponentialRampToValueAtTime(0.0001, when + 0.15);
+    env.gain.setValueAtTime(0.25, when);
+    env.gain.exponentialRampToValueAtTime(0.0001, when + 0.25);
     src.connect(band).connect(env).connect(out);
     src.start(when);
-    src.stop(when + 0.2);
+    src.stop(when + 0.3);
   }
 
   function testGong() {

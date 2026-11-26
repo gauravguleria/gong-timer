@@ -20,13 +20,17 @@ The default schedule is four bells, each 15 minutes apart, ringing 1, 2, 3 and 4
    - **iPhone (Safari):** Share → Add to Home Screen
    - **Android (Chrome):** menu → Install app / Add to Home screen
 
-## Updating from Git
+## Updating from Git (automatic)
 
-Push a change to `main`. GitHub Pages republishes in about a minute. The app fetches the newest files every time it opens, so the next time you open it you have the update. No reinstall needed.
+Every push to `main` is published by GitHub Pages within about a minute. The app always fetches the newest files from GitHub when it opens, so you get the update the next time you open it. You never reinstall or re-download anything.
+
+## Use your own gong recording
+
+Put your meditation gong recording in the repo at `sounds/gong.mp3`. The app plays that file for every strike. If the file is missing, it uses the built-in synthesized gong.
 
 ## Notes
 
-- The gong is synthesized in the browser, so no audio files are needed. Swap in a recorded gong by replacing the `strike()` function in `app.js`.
+- The built-in gong is synthesized in the browser. A real recording of a meditation gong sounds better, so use one when you can.
 - Volume goes up to 300% and is limited so it does not distort.
 - Keep the screen on during a session. Locked phones may pause the audio.
 
