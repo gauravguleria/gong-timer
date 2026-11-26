@@ -1,0 +1,6 @@
+{
+  "appId": "com.gauravguleria.gongtimer",
+  "appName": "Gong Timer",
+  "webDir": "www",
+  "bundledWebRuntime": false
+}

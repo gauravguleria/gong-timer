@@ -1,0 +1,61 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Capacitor
+        run: npm install
+
+      - name: Assemble web files into www/
+        run: |
+          rm -rf www && mkdir -p www
+          cp index.html styles.css app.js icon.svg www/
+          if [ -d sounds ]; then cp -r sounds www/; fi
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Sync web files into the Android project
+        run: npx cap sync android
+
+      - name: Use the persistent signing key (so updates install over old versions)
+        run: |
+          mkdir -p ~/.android
+          cp signing/debug.keystore ~/.android/debug.keystore
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Publish APK as a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ github.run_number }}"
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          cp "$APK" "gong-timer-$TAG.apk"
+          gh release create "$TAG" "gong-timer-$TAG.apk" \
+            --title "Gong Timer $TAG" \
+            --notes "Built automatically from commit ${{ github.sha }}. Open this release on your Android phone and tap the APK to install or update."
