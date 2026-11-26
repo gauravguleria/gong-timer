@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d0b1a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Gong">
+  <title>Gong Timer</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app">
+
+    <header class="top">
+      <div>
+        <p class="eyebrow">Meditation</p>
+        <h1>Gong Timer</h1>
+      </div>
+      <button id="testBtn" class="chip" type="button">Test gong</button>
+    </header>
+
+    <section class="dial-card">
+      <div id="dial" class="dial">
+        <div class="glow"></div>
+        <svg viewBox="0 0 200 200" aria-hidden="true">
+          <circle class="track" cx="100" cy="100" r="88"/>
+          <circle id="progress" class="progress" cx="100" cy="100" r="88"/>
+        </svg>
+        <div class="dial-center">
+          <p id="status" class="status">Ready</p>
+          <p id="countdown" class="countdown">00:00</p>
+          <p id="nextInfo" class="next"></p>
+        </div>
+      </div>
+      <div class="controls">
+        <button id="startBtn" class="btn primary" type="button">Start</button>
+        <button id="stopBtn" class="btn ghost" type="button" disabled>Stop</button>
+      </div>
+    </section>
+
+    <section class="card editable">
+      <div class="card-head">
+        <h2>Bell schedule</h2>
+        <span id="totalInfo" class="muted"></span>
+      </div>
+      <ol id="rows" class="rows"></ol>
+      <button id="addBtn" class="btn outline" type="button">+ Add bell</button>
+    </section>
+
+    <section class="card">
+      <h2>Sound</h2>
+      <label class="field">
+        <span class="field-top">Volume <output id="volOut">100%</output></span>
+        <input id="volume" type="range" min="10" max="300" step="5" value="100">
+      </label>
+      <label class="field editable">
+        <span class="field-top">Gap between strikes <output id="gapOut">6 s</output></span>
+        <input id="gap" type="range" min="2" max="15" step="1" value="6">
+      </label>
+      <label class="field editable">
+        <span class="field-top">Repeat whole schedule <output id="repOut">1×</output></span>
+        <input id="repeat" type="range" min="1" max="10" step="1" value="1">
+      </label>
+    </section>
+
+    <p class="footnote">Keep this screen open and the phone awake while a session runs. Locked phones can pause the sound.</p>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

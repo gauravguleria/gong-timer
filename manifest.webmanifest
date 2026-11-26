@@ -1,0 +1,19 @@
+{
+  "name": "Gong Timer",
+  "short_name": "Gong",
+  "description": "Schedule meditation gong bells at set intervals.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d0b1a",
+  "theme_color": "#0d0b1a",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
