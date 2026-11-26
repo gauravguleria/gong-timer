@@ -31,9 +31,30 @@ jobs:
           rm -rf www && mkdir -p www
           cp index.html styles.css app.js icon.svg www/
           if [ -d sounds ]; then cp -r sounds www/; fi
+          sed -i "s/__BUILD__/${{ github.run_number }}/" www/app.js
 
       - name: Create Android project
         run: npx cap add android
+
+      - name: Add native gong service (rings with screen off / app in background)
+        run: |
+          PKG_DIR=android/app/src/main/java/com/gauravguleria/gongtimer
+          mkdir -p "$PKG_DIR" android/app/src/main/res/raw
+          cp native/*.java "$PKG_DIR/"
+          cp sounds/gong.mp3 android/app/src/main/res/raw/gong.mp3
+          python3 - <<'PY'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          m = open(p).read()
+          perms = ('    <uses-permission android:name="android.permission.WAKE_LOCK" />\n'
+                   '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n'
+                   '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n'
+                   '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n')
+          m = m.replace('<application', perms + '    <application', 1)
+          svc = '        <service android:name=".GongService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n'
+          m = m.replace('</application>', svc + '    </application>', 1)
+          open(p, 'w').write(m)
+          PY
+          cat android/app/src/main/AndroidManifest.xml
 
       - name: Sync web files into the Android project
         run: npx cap sync android

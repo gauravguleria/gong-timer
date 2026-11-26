@@ -1,44 +1,51 @@
 (() => {
   'use strict';
 
-  const KEY = 'gong-timer-v3';
+  const BUILD = Number('__BUILD__') || 0;      // stamped in by the build
+  const REPO = 'gauravguleria/gong-timer';
+  const KEY = 'gong-timer-v4';
+  const OLD_KEY = 'gong-timer-v3';
   const MAX_PARTS = 6;
   const MAX_STRIKES = 12;
+  const MAX_SAVED = 30;
+  const MAX_RECENT = 5;
   const MINP = 15;              // shortest allowed part, seconds
-  const LOOKAHEAD_MS = 20000;   // schedule audio this far ahead
+  const LOOKAHEAD_MS = 20000;   // browser fallback: schedule audio this far ahead
   const RING_CIRC = 2 * Math.PI * 88;
   const WHEEL_ITEM_H = 44;      // must match .wheel-item height in styles.css
   const COPIES = 9, MID = 4;    // wheels repeat their numbers so they loop forever
 
-  // total = whole time set on the dial; parts = how it is split, each with its own gongs
   const DEFAULTS = {
     total: 15 * 60,
     parts: [{ secs: 15 * 60, strikes: 1 }],
-    volume: 100,   // percent, 10 to 300
-    gap: 6,        // seconds between strikes within one part's gongs
+    volume: 100,
+    gap: 6,
     repeat: 1,
+    keepScreen: true,
+    saved: [],
+    recent: [],
   };
+
+  // Native Android helper (foreground service). Absent in a normal browser.
+  let native = null;
+  try {
+    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      native = window.Capacitor.registerPlugin('Gong');
+    }
+  } catch (_) { native = null; }
 
   const $ = (id) => document.getElementById(id);
   const els = {
-    pickerWrap: $('pickerWrap'),
-    dial: $('dial'),
-    progress: $('progress'),
-    status: $('status'),
-    countdown: $('countdown'),
-    next: $('nextInfo'),
-    start: $('startBtn'),
-    stop: $('stopBtn'),
-    test: $('testBtn'),
-    partChips: $('partChips'),
-    parts: $('parts'),
-    totals: $('totalInfo'),
-    volume: $('volume'),
-    volOut: $('volOut'),
-    gap: $('gap'),
-    gapOut: $('gapOut'),
-    repeat: $('repeat'),
-    repOut: $('repOut'),
+    pickerWrap: $('pickerWrap'), dial: $('dial'), progress: $('progress'),
+    status: $('status'), countdown: $('countdown'), next: $('nextInfo'),
+    fab: $('fab'), partsBtn: $('partsBtn'), partsSummary: $('partsSummary'),
+    savedList: $('savedList'), recentList: $('recentList'), recentHead: $('recentHead'), addSaved: $('addSavedBtn'),
+    menuBtn: $('menuBtn'), menuDot: $('menuDot'), scrim: $('scrim'), drawer: $('drawer'), sheet: $('sheet'),
+    versionText: $('versionText'), updateItem: $('updateItem'), updateState: $('updateState'), updateDownload: $('updateDownload'),
+    partChips: $('partChips'), parts: $('parts'), totals: $('totalInfo'),
+    volume: $('volume'), volOut: $('volOut'), gap: $('gap'), gapOut: $('gapOut'),
+    repeat: $('repeat'), repOut: $('repOut'), test: $('testBtn'), screenOpts: $('screenOpts'),
+    saveName: $('saveName'), saveInfo: $('saveInfo'), saveConfirm: $('saveConfirm'),
     wheels: {
       h: document.querySelector('.wheel[data-unit="h"]'),
       m: document.querySelector('.wheel[data-unit="m"]'),
@@ -49,26 +56,38 @@
   els.progress.style.strokeDasharray = RING_CIRC;
 
   let state = load();
-  let pick = { h: 0, m: 15, s: 0 };   // what the wheels show
-  let audio = null;     // { ctx, master, sample, ready }
-  let session = null;   // { out, plan, startAt, queued, fired, timerId }
+  let pick = { h: 0, m: 15, s: 0 };
+  let audio = null;     // browser audio: { ctx, master, sample, ready }
+  let session = null;   // { out, plan, startAt, queued, fired, timerId, useNative }
   let wakeLock = null;
   let starting = false;
   let doneTimer = null;
+  let latest = null;    // { build, url } of the newest release
 
   // ---------- storage ----------
   function load() {
     let saved = null;
-    try { saved = JSON.parse(localStorage.getItem(KEY)); } catch (_) { /* ignore */ }
+    try {
+      saved = JSON.parse(localStorage.getItem(KEY) || localStorage.getItem(OLD_KEY));
+    } catch (_) { /* ignore */ }
     const s = { ...structuredClone(DEFAULTS), ...(saved || {}) };
-    s.parts = (Array.isArray(s.parts) && s.parts.length ? s.parts : structuredClone(DEFAULTS.parts))
-      .slice(0, MAX_PARTS)
-      .map((p) => ({ secs: Math.max(0, Math.floor(p.secs) || 0), strikes: Math.min(MAX_STRIKES, Math.max(1, p.strikes || 1)) }));
+    const clean = (parts) => (Array.isArray(parts) ? parts : []).slice(0, MAX_PARTS).map((p) => ({
+      secs: Math.max(0, Math.floor(p.secs) || 0),
+      strikes: Math.min(MAX_STRIKES, Math.max(1, p.strikes || 1)),
+    }));
+    s.parts = clean(s.parts);
+    if (!s.parts.length) s.parts = structuredClone(DEFAULTS.parts);
     const sum = s.parts.reduce((t, p) => t + p.secs, 0);
     if (!(s.total > 0) || sum !== s.total) {
       s.total = sum || DEFAULTS.total;
       if (!sum) s.parts = structuredClone(DEFAULTS.parts);
     }
+    s.saved = (Array.isArray(s.saved) ? s.saved : []).slice(0, MAX_SAVED).map((x) => ({
+      id: x.id, name: String(x.name || 'Session').slice(0, 24), total: x.total, parts: clean(x.parts),
+    })).filter((x) => x.parts.length);
+    s.recent = (Array.isArray(s.recent) ? s.recent : []).slice(0, MAX_RECENT).map((x) => ({
+      total: x.total, parts: clean(x.parts),
+    })).filter((x) => x.parts.length);
     return s;
   }
   function save() {
@@ -88,10 +107,14 @@
     return h ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
   }
   const fmtSecs = (secs) => fmt(secs * 1000);
+  const fmtLong = (secs) => `${pad(Math.floor(secs / 3600))}:${pad(Math.floor((secs % 3600) / 60))}:${pad(secs % 60)}`;
   const pickSecs = () => pick.h * 3600 + pick.m * 60 + pick.s;
   const maxParts = () => Math.max(1, Math.min(MAX_PARTS, Math.floor(state.total / MINP)));
+  const sig = (parts) => JSON.stringify(parts.map((p) => [p.secs, p.strikes]));
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const totalGongs = (parts) => parts.reduce((t, p) => t + p.strikes, 0);
 
-  // Every strike as milliseconds from Start. Part N's gongs ring when its time is up.
+  // Every strike as milliseconds from Start. A part's gongs ring when its time is up.
   function buildPlan() {
     const hits = [];
     let t = 0;
@@ -108,7 +131,6 @@
   const sumBefore = (i) => state.parts.slice(0, i).reduce((t, p) => t + p.secs, 0);
   const maxFor = (i) => state.total - sumBefore(i) - (state.parts.length - 1 - i) * MINP;
 
-  // keep every part within bounds and make the last part the remainder
   function normalize() {
     const n = state.parts.length;
     for (let i = 0; i < n - 1; i++) {
@@ -143,8 +165,7 @@
     normalize();
   }
 
-  // ---------- audio ----------
-  // Only your recorded gong (sounds/gong.mp3) is ever played.
+  // ---------- audio (browser: used for the test gong and when not in the Android app) ----------
   function getAudio() {
     if (!audio) {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -187,35 +208,49 @@
   async function testGong() {
     const a = getAudio();
     await a.ready;
-    if (!a.sample) { els.next.textContent = 'Gong sound file not found'; return; }
+    if (!a.sample) return;
     const out = a.ctx.createGain();
     out.connect(a.master);
     strike(a, a.ctx.currentTime + 0.05, out);
-    setTimeout(() => out.disconnect(), 12000);
+    setTimeout(() => out.disconnect(), 24000);
   }
 
   // ---------- session ----------
   async function start() {
-    if (isRunning() || starting) return;
+    if (isRunning() || starting || state.total === 0) return;
     const plan = buildPlan();
     if (!plan.length) return;
 
     clearTimeout(doneTimer);
     starting = true;
-    const a = getAudio();
-    await a.ready;
-    starting = false;
-    if (!a.sample) { alert('Gong sound file (sounds/gong.mp3) was not found.'); return; }
-    const out = a.ctx.createGain();
-    out.connect(a.master);
+    let useNative = false;
+    let out = null;
+    try {
+      if (native) {
+        try {
+          await native.start({ offsets: plan, volume: state.volume });
+          useNative = true;
+        } catch (_) { useNative = false; }
+      }
+      if (!useNative) {
+        const a = getAudio();
+        await a.ready;
+        if (!a.sample) { alert('Gong sound file was not found.'); return; }
+        out = a.ctx.createGain();
+        out.connect(a.master);
+      }
+    } finally {
+      starting = false;
+    }
 
-    session = { out, plan, startAt: Date.now() + 250, queued: 0, fired: 0, timerId: null };
-    session.timerId = setInterval(tick, 150);
+    rememberRecent();
+    // the clock starts only now, after audio is ready, so the first number shown is the full time
+    session = { out, plan, startAt: Date.now(), queued: 0, fired: 0, timerId: null, useNative };
+    session.timerId = setInterval(tick, 200);
 
     setMode(true);
     document.body.classList.add('is-running');
-    els.start.disabled = true;
-    els.stop.disabled = false;
+    renderFab();
     keepAwake(true);
     tick();
   }
@@ -223,7 +258,8 @@
   function stop() {
     if (!isRunning()) return;
     clearInterval(session.timerId);
-    session.out.disconnect();   // silences anything still ringing
+    if (session.useNative && native) native.stop().catch(() => {});
+    if (session.out) session.out.disconnect();   // silences anything still ringing
     session = null;
     finishUi(false);
   }
@@ -234,17 +270,14 @@
     finishUi(true);
   }
 
-  // Idle shows the wheels; running shows the countdown ring.
   function setMode(running) {
     els.pickerWrap.hidden = running;
     els.dial.hidden = !running;
-    // hidden wheels lose their scroll position, so put them back where the values are
     if (!running) renderPicker();
   }
 
   function finishUi(completed) {
     document.body.classList.remove('is-running');
-    els.stop.disabled = true;
     keepAwake(false);
     els.dial.classList.remove('hit');
     if (completed) {
@@ -252,30 +285,26 @@
       els.countdown.textContent = '00:00';
       els.next.textContent = 'Session finished';
       els.progress.style.strokeDashoffset = 0;
-      els.start.disabled = false;
-      // go back to the wheels so a new session can be started
       doneTimer = setTimeout(() => { if (!isRunning()) setMode(false); }, 3500);
     } else {
       setMode(false);
     }
-    updateStart();
-    renderTotals();
-  }
-
-  function updateStart() {
-    els.start.disabled = isRunning() || starting || state.total === 0;
+    renderFab();
+    renderAll();
   }
 
   function tick() {
     if (!session) return;
     const now = Date.now();
     const { plan, startAt, out } = session;
-    const a = audio;
 
-    while (session.queued < plan.length && startAt + plan[session.queued] <= now + LOOKAHEAD_MS) {
-      const delay = Math.max(0.01, (startAt + plan[session.queued] - now) / 1000);
-      strike(a, a.ctx.currentTime + delay, out);
-      session.queued++;
+    if (!session.useNative) {
+      const a = audio;
+      while (session.queued < plan.length && startAt + plan[session.queued] <= now + LOOKAHEAD_MS) {
+        const delay = Math.max(0.01, (startAt + plan[session.queued] - now) / 1000);
+        strike(a, a.ctx.currentTime + delay, out);
+        session.queued++;
+      }
     }
 
     let fired = false;
@@ -285,19 +314,14 @@
     }
     if (fired) flash();
 
-    if (session.fired >= plan.length) {
-      finish();
-      return;
-    }
+    if (session.fired >= plan.length) { finish(); return; }
 
     const total = plan[plan.length - 1];
-    const elapsed = now - startAt;
-    const progress = total > 0 ? clamp(elapsed / total, 0, 1) : 1;
+    const progress = total > 0 ? clamp((now - startAt) / total, 0, 1) : 1;
     els.progress.style.strokeDashoffset = RING_CIRC * (1 - progress);
 
-    const untilNext = startAt + plan[session.fired] - now;
     els.status.textContent = session.fired === 0 ? 'First gong in' : 'Next gong in';
-    els.countdown.textContent = fmt(untilNext);
+    els.countdown.textContent = fmt(startAt + plan[session.fired] - now);
     els.next.textContent = `Gong ${session.fired + 1} of ${plan.length}`;
   }
 
@@ -307,9 +331,12 @@
     els.dial.classList.add('hit');
   }
 
+  // Screen: "on" keeps it awake while running; "off" lets it sleep (gongs still ring).
   async function keepAwake(on) {
+    const want = on && state.keepScreen;
+    if (native) native.keepAwake({ on: want }).catch(() => {});
     try {
-      if (on) {
+      if (want) {
         if ('wakeLock' in navigator && document.visibilityState === 'visible') {
           if (wakeLock) await wakeLock.release().catch(() => {});
           wakeLock = await navigator.wakeLock.request('screen');
@@ -335,7 +362,7 @@
     const list = wheel.querySelector('.wheel-list');
     const n = max + 1;
     list.innerHTML = Array.from({ length: COPIES * n }, (_, i) =>
-      `<div class="wheel-item" data-v="${i % n}">${pad(i % n)}</div>`).join('');
+      `<div class="wheel-item">${pad(i % n)}</div>`).join('');
     const items = [...list.children];
     let value = -1;
     let settle = null;
@@ -352,7 +379,6 @@
       }
       clearTimeout(settle);
       settle = setTimeout(() => {
-        // after the wheel rests, jump back to the middle copy so it never runs out
         const i = Math.round(list.scrollTop / WHEEL_ITEM_H);
         if (i < n * 2 || i >= n * (COPIES - 2)) list.scrollTop = (MID * n + v) * WHEEL_ITEM_H;
       }, 150);
@@ -381,13 +407,10 @@
     if (t === state.total) return;
     setTotal(t);
     save();
-    renderPartChips();
-    renderParts();
-    renderTotals();
-    updateStart();
+    renderAll();
   }
 
-  // ---------- split into parts ----------
+  // ---------- parts editor (inside the sheet) ----------
   function renderPartChips() {
     const max = maxParts();
     els.partChips.innerHTML = Array.from({ length: MAX_PARTS }, (_, i) => {
@@ -406,7 +429,7 @@
     save();
     renderPartChips();
     renderParts();
-    renderTotals();
+    renderSummary();
   });
 
   function renderParts() {
@@ -432,7 +455,7 @@
             <button class="step" data-act="dec" type="button" aria-label="One fewer gong">−</button>
             <span class="dots" aria-label="${p.strikes} gongs">${'<i></i>'.repeat(p.strikes)}</span>
             <button class="step" data-act="inc" type="button" aria-label="One more gong">+</button>
-            <span class="unit">${p.strikes} gong${p.strikes === 1 ? '' : 's'}</span>
+            <span class="unit">${plural(p.strikes, 'gong')}</span>
           </div>
         </div>
       </li>`;
@@ -440,7 +463,6 @@
     updatePartTimes();
   }
 
-  // update times and slider limits without rebuilding the rows (keeps a drag smooth)
   function updatePartTimes() {
     els.parts.querySelectorAll('.pt').forEach((el) => {
       el.textContent = fmtSecs(state.parts[Number(el.dataset.i)].secs);
@@ -450,7 +472,7 @@
       el.max = Math.max(MINP, maxFor(i));
       el.value = state.parts[i].secs;
     });
-    renderTotals();
+    renderSummary();
   }
 
   els.parts.addEventListener('input', (e) => {
@@ -467,11 +489,10 @@
     const btn = e.target.closest('button[data-act]');
     const li = e.target.closest('li[data-i]');
     if (!btn || !li) return;
-    const i = Number(li.dataset.i);
-    const p = state.parts[i];
+    const p = state.parts[Number(li.dataset.i)];
     switch (btn.dataset.act) {
-      case 'tdec': p.secs = p.secs - 60; normalize(); save(); updatePartTimes(); return;
-      case 'tinc': p.secs = p.secs + 60; normalize(); save(); updatePartTimes(); return;
+      case 'tdec': p.secs -= 60; normalize(); save(); updatePartTimes(); return;
+      case 'tinc': p.secs += 60; normalize(); save(); updatePartTimes(); return;
       case 'inc': p.strikes = Math.min(MAX_STRIKES, p.strikes + 1); break;
       case 'dec': p.strikes = Math.max(1, p.strikes - 1); break;
     }
@@ -479,20 +500,115 @@
     renderParts();
   });
 
-  function renderTotals() {
+  // ---------- summary + saved / recent lists ----------
+  function renderSummary() {
+    els.partsSummary.textContent = `${plural(state.parts.length, 'part')} · ${plural(totalGongs(state.parts), 'gong')}`;
     const plan = buildPlan();
     const total = plan.length ? plan[plan.length - 1] : 0;
-    els.totals.textContent = plan.length
-      ? `${fmt(total)} · ${plan.length} gong${plan.length === 1 ? '' : 's'}`
-      : '';
+    els.totals.textContent = plan.length ? `${fmt(total)} · ${plural(plan.length, 'gong')}` : '';
+    renderLists();
   }
 
-  function renderIdle() {
-    setMode(false);
-    els.stop.disabled = true;
-    updateStart();
+  function itemRow(item, kind, i) {
+    const current = item.total === state.total && sig(item.parts) === sig(state.parts);
+    const title = kind === 'saved' ? item.name : fmtLong(item.total);
+    const sub = `${plural(item.parts.length, 'part')} · ${plural(totalGongs(item.parts), 'gong')}`;
+    const action = kind === 'saved'
+      ? `<button class="mini" data-act="del" aria-label="Delete">×</button>`
+      : `<button class="mini" data-act="star" aria-label="Save">☆</button>`;
+    return `<li class="item${current ? ' current' : ''}" data-kind="${kind}" data-i="${i}">
+      <button class="item-main" data-act="use" type="button">
+        <span class="item-name">${title.replace(/</g, '&lt;')}</span>
+        <span class="item-sub">${sub}</span>
+      </button>
+      <span class="item-time">${fmtLong(item.total)}</span>
+      ${action}
+    </li>`;
   }
 
+  function renderLists() {
+    els.savedList.innerHTML = state.saved.length
+      ? state.saved.map((x, i) => itemRow(x, 'saved', i)).join('')
+      : '<li class="empty">Tap Add to save the current session.</li>';
+    const recent = state.recent.filter((r) => !state.saved.some((s) => s.total === r.total && sig(s.parts) === sig(r.parts)));
+    els.recentHead.hidden = recent.length === 0;
+    els.recentList.innerHTML = recent.map((x) => itemRow(x, 'recent', state.recent.indexOf(x))).join('');
+  }
+
+  function applyItem(item) {
+    state.total = item.total;
+    state.parts = structuredClone(item.parts);
+    save();
+    renderPicker();
+    renderAll();
+  }
+
+  function rememberRecent() {
+    const entry = { total: state.total, parts: structuredClone(state.parts) };
+    state.recent = [entry, ...state.recent.filter((r) => !(r.total === entry.total && sig(r.parts) === sig(entry.parts)))].slice(0, MAX_RECENT);
+    save();
+  }
+
+  document.querySelector('.lists').addEventListener('click', (e) => {
+    if (isRunning()) return;
+    const li = e.target.closest('li.item');
+    const btn = e.target.closest('[data-act]');
+    if (!li || !btn) return;
+    const list = li.dataset.kind === 'saved' ? state.saved : state.recent;
+    const item = list[Number(li.dataset.i)];
+    if (!item) return;
+    switch (btn.dataset.act) {
+      case 'use': applyItem(item); break;
+      case 'del': state.saved.splice(Number(li.dataset.i), 1); save(); renderLists(); break;
+      case 'star': openSave(item); break;
+    }
+  });
+
+  // ---------- save dialog ----------
+  let toSave = null;
+  function openSave(item) {
+    toSave = item || { total: state.total, parts: structuredClone(state.parts) };
+    els.saveInfo.textContent = `${fmtLong(toSave.total)} · ${plural(toSave.parts.length, 'part')} · ${plural(totalGongs(toSave.parts), 'gong')}`;
+    els.saveName.value = '';
+    openSheet('save');
+    setTimeout(() => els.saveName.focus(), 250);
+  }
+  els.addSaved.addEventListener('click', () => { if (!isRunning()) openSave(null); });
+  els.saveConfirm.addEventListener('click', () => {
+    if (!toSave) return;
+    const name = els.saveName.value.trim() || `Session ${state.saved.length + 1}`;
+    state.saved.unshift({ id: Date.now(), name, total: toSave.total, parts: structuredClone(toSave.parts) });
+    state.saved = state.saved.slice(0, MAX_SAVED);
+    toSave = null;
+    save();
+    closeAll();
+    renderLists();
+  });
+
+  // ---------- menu, sheet ----------
+  function showScrim(on) { els.scrim.hidden = !on; }
+  function openDrawer() { closeSheet(); els.drawer.hidden = false; showScrim(true); }
+  function closeDrawer() { els.drawer.hidden = true; }
+  function openSheet(name) {
+    closeDrawer();
+    els.sheet.querySelectorAll('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== name; });
+    if (name === 'parts') { renderPartChips(); renderParts(); }
+    els.sheet.hidden = false;
+    showScrim(true);
+  }
+  function closeSheet() { els.sheet.hidden = true; }
+  function closeAll() { closeDrawer(); closeSheet(); showScrim(false); }
+
+  els.menuBtn.addEventListener('click', openDrawer);
+  els.scrim.addEventListener('click', closeAll);
+  els.partsBtn.addEventListener('click', () => { if (!isRunning()) openSheet('parts'); });
+  document.addEventListener('click', (e) => {
+    const open = e.target.closest('[data-open]');
+    if (open) openSheet(open.dataset.open);
+    if (e.target.closest('[data-close]')) closeAll();
+  });
+
+  // ---------- settings ----------
   function renderSound() {
     els.volume.value = state.volume;
     els.volOut.textContent = `${state.volume}%`;
@@ -500,45 +616,98 @@
     els.gapOut.textContent = `${state.gap} s`;
     els.repeat.value = state.repeat;
     els.repOut.textContent = `${state.repeat}×`;
+    els.screenOpts.querySelectorAll('button').forEach((b) => {
+      const on = (b.dataset.screen === 'on') === state.keepScreen;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-checked', String(on));
+    });
   }
-
-  // tap the finished dial to get the wheels back right away
-  els.dial.addEventListener('click', () => { if (!isRunning()) { clearTimeout(doneTimer); setMode(false); } });
 
   els.volume.addEventListener('input', () => {
     state.volume = Number(els.volume.value);
     els.volOut.textContent = `${state.volume}%`;
     if (audio) audio.master.gain.setTargetAtTime(state.volume / 100, audio.ctx.currentTime, 0.02);
+    if (native) native.setVolume({ volume: state.volume }).catch(() => {});
     save();
   });
-
   els.gap.addEventListener('input', () => {
     state.gap = Number(els.gap.value);
     els.gapOut.textContent = `${state.gap} s`;
     save();
-    renderTotals();
+    renderSummary();
   });
-
   els.repeat.addEventListener('input', () => {
     state.repeat = Number(els.repeat.value);
     els.repOut.textContent = `${state.repeat}×`;
     save();
-    renderTotals();
+    renderSummary();
   });
-
-  els.start.addEventListener('click', start);
-  els.stop.addEventListener('click', stop);
+  els.screenOpts.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-screen]');
+    if (!b) return;
+    state.keepScreen = b.dataset.screen === 'on';
+    save();
+    renderSound();
+    if (isRunning()) keepAwake(true);
+  });
   els.test.addEventListener('click', testGong);
+
+  // ---------- updates ----------
+  function setUpdateUi(text, available) {
+    els.updateState.textContent = text;
+    els.menuDot.hidden = !available;
+    els.updateDownload.hidden = !available;
+  }
+
+  async function checkUpdate(manual) {
+    if (manual) setUpdateUi('Checking…', false);
+    try {
+      const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(String(res.status));
+      const j = await res.json();
+      const build = parseInt(String(j.tag_name).replace(/\D/g, ''), 10);
+      const asset = (j.assets || []).find((a) => /\.apk$/i.test(a.name));
+      latest = { build, url: asset ? asset.browser_download_url : j.html_url };
+      if (BUILD > 0 && build > BUILD) setUpdateUi(`v${build} available`, true);
+      else setUpdateUi(manual ? 'Up to date' : '', false);
+    } catch (_) {
+      if (manual) setUpdateUi('Could not check', false);
+    }
+  }
+  els.updateItem.addEventListener('click', () => checkUpdate(true));
+  els.updateDownload.addEventListener('click', () => { if (latest) window.location.href = latest.url; });
+  els.versionText.textContent = BUILD ? `Version ${BUILD}` : 'Web version';
+
+  // ---------- fab ----------
+  const ICON_PLAY = '<svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>';
+  const ICON_STOP = '<svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor"/></svg>';
+  function renderFab() {
+    const running = isRunning();
+    els.fab.innerHTML = running ? ICON_STOP : ICON_PLAY;
+    els.fab.setAttribute('aria-label', running ? 'Stop' : 'Start');
+    els.fab.classList.toggle('stop', running);
+    els.fab.disabled = !running && state.total === 0;
+  }
+  els.fab.addEventListener('click', () => { if (isRunning()) stop(); else start(); });
+
+  // tap the finished dial to get the wheels back right away
+  els.dial.addEventListener('click', () => { if (!isRunning()) { clearTimeout(doneTimer); setMode(false); } });
+
+  function renderAll() {
+    renderSummary();
+    renderFab();
+    if (!els.sheet.hidden) { renderPartChips(); renderParts(); }
+  }
 
   // ---------- boot ----------
   renderSound();
   getAudio();            // start loading the gong right away
   renderPicker();
-  renderPartChips();
-  renderParts();
-  renderIdle();
+  renderAll();
+  setMode(false);
+  checkUpdate(false);
 
-  if ('serviceWorker' in navigator) {
+  if ('serviceWorker' in navigator && !native) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').catch(() => {});
     });

@@ -4,9 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0d0b1a">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Gong">
   <title>Gong Timer</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
@@ -16,34 +13,32 @@
   <main class="app">
 
     <header class="top">
-      <div>
+      <button id="menuBtn" class="icon-btn" type="button" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+        <span id="menuDot" class="dot" hidden></span>
+      </button>
+      <div class="titles">
         <p class="eyebrow">Meditation</p>
         <h1>Gong Timer</h1>
       </div>
-      <button id="testBtn" class="chip" type="button">Test gong</button>
     </header>
 
     <section class="dial-card">
-      <!-- Idle: scroll the wheels to set the time -->
+      <!-- Idle: loop the wheels to set the total time -->
       <div id="pickerWrap" class="picker-wrap">
-        <p class="sub center">Total time</p>
-        <div class="picker" aria-label="Set the time">
-          <div class="wheel" data-unit="h">
-            <div class="wheel-list" aria-label="Hours"></div>
-          </div>
+        <div class="picker" aria-label="Set the total time">
+          <div class="wheel" data-unit="h"><div class="wheel-list" aria-label="Hours"></div></div>
           <span class="colon">:</span>
-          <div class="wheel" data-unit="m">
-            <div class="wheel-list" aria-label="Minutes"></div>
-          </div>
+          <div class="wheel" data-unit="m"><div class="wheel-list" aria-label="Minutes"></div></div>
           <span class="colon">:</span>
-          <div class="wheel" data-unit="s">
-            <div class="wheel-list" aria-label="Seconds"></div>
-          </div>
+          <div class="wheel" data-unit="s"><div class="wheel-list" aria-label="Seconds"></div></div>
           <div class="picker-band" aria-hidden="true"></div>
         </div>
-        <div class="picker-labels">
-          <span>hours</span><span>minutes</span><span>seconds</span>
-        </div>
+        <div class="picker-labels"><span>hours</span><span>minutes</span><span>seconds</span></div>
+        <button id="partsBtn" class="parts-btn editable" type="button">
+          <span id="partsSummary">1 part · 1 gong</span>
+          <span class="chev" aria-hidden="true">›</span>
+        </button>
       </div>
 
       <!-- Running: countdown ring -->
@@ -59,40 +54,91 @@
           <p id="nextInfo" class="next"></p>
         </div>
       </div>
-
-      <div class="controls">
-        <button id="startBtn" class="btn primary" type="button">Start</button>
-        <button id="stopBtn" class="btn ghost" type="button" disabled>Stop</button>
-      </div>
     </section>
 
-    <section class="card editable">
-      <div class="card-head">
-        <h2>Split the time into parts</h2>
-        <span id="totalInfo" class="muted"></span>
+    <section class="lists editable">
+      <div class="list-head">
+        <h2>Saved sessions</h2>
+        <button id="addSavedBtn" class="link-btn" type="button">Add</button>
       </div>
+      <ul id="savedList" class="list"></ul>
+
+      <div id="recentHead" class="list-head" hidden>
+        <h2>Recent</h2>
+      </div>
+      <ul id="recentList" class="list"></ul>
+    </section>
+  </main>
+
+  <button id="fab" class="fab" type="button" aria-label="Start"></button>
+
+  <div id="scrim" class="scrim" hidden></div>
+
+  <!-- Side menu -->
+  <aside id="drawer" class="drawer" hidden>
+    <div class="drawer-head">
+      <p class="eyebrow">Meditation</p>
+      <h2 class="drawer-title">Gong Timer</h2>
+      <p id="versionText" class="muted"></p>
+    </div>
+    <button class="menu-item" type="button" data-open="settings">
+      <span>Settings</span><span class="chev">›</span>
+    </button>
+    <button id="updateItem" class="menu-item" type="button">
+      <span>Check for updates</span><span id="updateState" class="muted"></span>
+    </button>
+    <button id="updateDownload" class="btn primary small-btn" type="button" hidden>Download update</button>
+  </aside>
+
+  <!-- Bottom sheet -->
+  <div id="sheet" class="sheet" hidden role="dialog">
+    <div class="sheet-handle"></div>
+
+    <section data-panel="parts" hidden>
+      <div class="sheet-head"><h2>Parts &amp; gongs</h2><span id="totalInfo" class="muted"></span></div>
+      <p class="hint">Split the total time into parts. Each part rings its own gongs when its time is up.</p>
+      <p class="sub">Number of parts</p>
       <div id="partChips" class="chips" role="radiogroup" aria-label="Number of parts"></div>
       <ol id="parts" class="rows"></ol>
+      <button class="btn primary done" type="button" data-close>Done</button>
     </section>
 
-    <section class="card">
-      <h2>Sound</h2>
+    <section data-panel="settings" hidden>
+      <div class="sheet-head"><h2>Settings</h2></div>
       <label class="field">
         <span class="field-top">Volume <output id="volOut">100%</output></span>
         <input id="volume" type="range" min="10" max="300" step="5" value="100">
       </label>
+      <button id="testBtn" class="btn ghost test-btn" type="button">Play test gong</button>
+
       <label class="field editable">
-        <span class="field-top">Gap between strikes <output id="gapOut">6 s</output></span>
+        <span class="field-top">Gap between gongs in a part <output id="gapOut">6 s</output></span>
         <input id="gap" type="range" min="2" max="15" step="1" value="6">
       </label>
       <label class="field editable">
-        <span class="field-top">Repeat whole schedule <output id="repOut">1×</output></span>
+        <span class="field-top">Repeat the whole session <output id="repOut">1×</output></span>
         <input id="repeat" type="range" min="1" max="10" step="1" value="1">
       </label>
+
+      <p class="sub">Screen while running</p>
+      <div class="seg" id="screenOpts" role="radiogroup">
+        <button type="button" role="radio" data-screen="on">Keep screen on</button>
+        <button type="button" role="radio" data-screen="off">Let screen turn off</button>
+      </div>
+      <p class="hint">Gongs ring either way, even with the screen off or the app in the background.</p>
+      <button class="btn primary done" type="button" data-close>Done</button>
     </section>
 
-    <p class="footnote">Keep this screen open and the phone awake while a session runs. Locked phones can pause the sound.</p>
-  </main>
+    <section data-panel="save" hidden>
+      <div class="sheet-head"><h2>Save this session</h2></div>
+      <p id="saveInfo" class="hint"></p>
+      <input id="saveName" class="text-input" type="text" maxlength="24" placeholder="Name, e.g. Morning sit" autocomplete="off">
+      <div class="two-btns">
+        <button class="btn ghost" type="button" data-close>Cancel</button>
+        <button id="saveConfirm" class="btn primary" type="button">Save</button>
+      </div>
+    </section>
+  </div>
 
   <script src="app.js"></script>
 </body>
