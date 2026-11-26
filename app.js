@@ -1,26 +1,22 @@
 (() => {
   'use strict';
 
-  const KEY = 'gong-timer-v1';
+  const KEY = 'gong-timer-v2';
   const MAX_STEPS = 20;
   const MAX_STRIKES = 12;
   const LOOKAHEAD_MS = 20000;   // schedule audio this far ahead
   const RING_CIRC = 2 * Math.PI * 88;
+  const WHEEL_ITEM_H = 44;      // must match .wheel-item height in styles.css
 
+  // A bell = { secs: delay before it rings (from the previous bell), strikes: gongs }
   const DEFAULTS = {
-    steps: [
-      { min: 15, sec: 0, strikes: 1 },
-      { min: 15, sec: 0, strikes: 2 },
-      { min: 15, sec: 0, strikes: 3 },
-      { min: 15, sec: 0, strikes: 4 },
-    ],
+    steps: [{ secs: 15 * 60, strikes: 1 }],
     volume: 100,   // percent, 10 to 300
     gap: 6,        // seconds between strikes within one bell
     repeat: 1,     // how many times the whole schedule runs
   };
 
-  // Synth gong (used only if no recording is found in sounds/gong.mp3).
-  // Deep fundamental, slow swelling attack, long warm decay, soft mallet thump.
+  // Synth gong, used only if sounds/gong.mp3 is missing.
   // [ratio, level, decay seconds, attack seconds]
   const PARTIALS = [
     [1.00, 1.00, 24, 0.10],
@@ -35,16 +31,19 @@
 
   const $ = (id) => document.getElementById(id);
   const els = {
-    rows: $('rows'),
-    add: $('addBtn'),
-    start: $('startBtn'),
-    stop: $('stopBtn'),
-    test: $('testBtn'),
+    pickerWrap: $('pickerWrap'),
     dial: $('dial'),
     progress: $('progress'),
     status: $('status'),
     countdown: $('countdown'),
     next: $('nextInfo'),
+    start: $('startBtn'),
+    stop: $('stopBtn'),
+    test: $('testBtn'),
+    chips: $('gongChips'),
+    add: $('addBtn'),
+    cancel: $('cancelBtn'),
+    rows: $('rows'),
     totals: $('totalInfo'),
     volume: $('volume'),
     volOut: $('volOut'),
@@ -52,12 +51,19 @@
     gapOut: $('gapOut'),
     repeat: $('repeat'),
     repOut: $('repOut'),
+    wheels: {
+      h: document.querySelector('.wheel[data-unit="h"]'),
+      m: document.querySelector('.wheel[data-unit="m"]'),
+      s: document.querySelector('.wheel[data-unit="s"]'),
+    },
   };
 
   els.progress.style.strokeDasharray = RING_CIRC;
 
   let state = load();
-  let audio = null;     // { ctx, master, noise }
+  let pick = { h: 0, m: 15, s: 0, strikes: 1 };  // what the picker currently shows
+  let editIndex = null;                            // bell being edited, or null
+  let audio = null;     // { ctx, master, noise, sample }
   let session = null;   // { out, plan, startAt, queued, fired, timerId }
   let wakeLock = null;
 
@@ -67,6 +73,10 @@
     try { saved = JSON.parse(localStorage.getItem(KEY)); } catch (_) { /* ignore */ }
     const s = { ...structuredClone(DEFAULTS), ...(saved || {}) };
     if (!Array.isArray(s.steps) || !s.steps.length) s.steps = structuredClone(DEFAULTS.steps);
+    s.steps = s.steps.map((b) => ({
+      secs: Number.isFinite(b.secs) ? b.secs : (b.min || 0) * 60 + (b.sec || 0),
+      strikes: Math.min(MAX_STRIKES, Math.max(1, b.strikes || 1)),
+    }));
     return s;
   }
   function save() {
@@ -76,6 +86,8 @@
   // ---------- helpers ----------
   const isRunning = () => session !== null;
   const pad = (n) => String(n).padStart(2, '0');
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
   function fmt(ms) {
     const s = Math.max(0, Math.ceil(ms / 1000));
     const h = Math.floor(s / 3600);
@@ -83,16 +95,17 @@
     const sec = s % 60;
     return h ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
   }
+  const hms = (secs) => `${Math.floor(secs / 3600)}:${pad(Math.floor((secs % 3600) / 60))}:${pad(secs % 60)}`;
+  const pickSecs = () => pick.h * 3600 + pick.m * 60 + pick.s;
 
-  // Flat list of every strike, as milliseconds from the start of the session.
-  // Each bell's delay is measured from the previous bell (the first from Start).
+  // Every strike as milliseconds from Start. Each bell's delay counts from the previous bell.
   function buildPlan() {
     const hits = [];
     let t = 0;
     for (let r = 0; r < state.repeat; r++) {
-      for (const s of state.steps) {
-        t += (s.min * 60 + s.sec) * 1000;
-        for (let k = 0; k < s.strikes; k++) hits.push(t + k * state.gap * 1000);
+      for (const b of state.steps) {
+        t += b.secs * 1000;
+        for (let k = 0; k < b.strikes; k++) hits.push(t + k * state.gap * 1000);
       }
     }
     return hits.sort((a, b) => a - b);
@@ -113,14 +126,12 @@
       master.connect(limiter);
       limiter.connect(ctx.destination);
 
-      // one shared burst of noise for the mallet-strike transient
       const len = Math.floor(ctx.sampleRate * 0.3);
       const noise = ctx.createBuffer(1, len, ctx.sampleRate);
       const data = noise.getChannelData(0);
       for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
 
       audio = { ctx, master, noise, sample: null };
-      // A real recording of your gong, if you add one at sounds/gong.mp3 in the repo.
       loadSample(ctx).then((buf) => { if (audio) audio.sample = buf; });
     }
     if (audio.ctx.state === 'suspended') audio.ctx.resume().catch(() => {});
@@ -141,7 +152,6 @@
   function strike(a, when, out) {
     const { ctx, noise } = a;
 
-    // Prefer the recorded gong when it is present.
     if (a.sample) {
       const src = ctx.createBufferSource();
       src.buffer = a.sample;
@@ -150,7 +160,6 @@
       return;
     }
 
-    // Soft, warm lowpass so the tone never gets metallic or harsh.
     const warm = ctx.createBiquadFilter();
     warm.type = 'lowpass';
     warm.frequency.value = 2400;
@@ -158,7 +167,6 @@
     warm.connect(out);
 
     PARTIALS.forEach(([ratio, level, decay, attack], i) => {
-      // two detuned sines per partial: the slow shimmer and swell of a real gong
       for (const detune of [-0.7, 0.7]) {
         const osc = ctx.createOscillator();
         const env = ctx.createGain();
@@ -173,7 +181,6 @@
       }
     });
 
-    // soft mallet thump: a low, short noise burst
     const src = ctx.createBufferSource();
     src.buffer = noise;
     const band = ctx.createBiquadFilter();
@@ -206,16 +213,10 @@
     const out = a.ctx.createGain();
     out.connect(a.master);
 
-    session = {
-      out,
-      plan,
-      startAt: Date.now() + 250,
-      queued: 0,
-      fired: 0,
-      timerId: null,
-    };
+    session = { out, plan, startAt: Date.now() + 250, queued: 0, fired: 0, timerId: null };
     session.timerId = setInterval(tick, 150);
 
+    setMode(true);
     document.body.classList.add('is-running');
     els.start.disabled = true;
     els.stop.disabled = false;
@@ -233,9 +234,16 @@
 
   function finish() {
     clearInterval(session.timerId);
-    // the last gong keeps ringing out; only the timer stops
-    session = null;
+    session = null;             // the last gong rings out; only the timer stops
     finishUi(true);
+  }
+
+  // Idle shows the wheels; running shows the countdown ring.
+  function setMode(running) {
+    els.pickerWrap.hidden = running;
+    els.dial.hidden = !running;
+    // hidden wheels lose their scroll position, so put them back where the values are
+    if (!running) renderPicker();
   }
 
   function finishUi(completed) {
@@ -243,15 +251,17 @@
     els.start.disabled = false;
     els.stop.disabled = true;
     keepAwake(false);
-    els.progress.style.strokeDashoffset = completed ? 0 : RING_CIRC;
     els.dial.classList.remove('hit');
     if (completed) {
       els.status.textContent = 'Complete';
       els.countdown.textContent = '00:00';
       els.next.textContent = 'Session finished';
+      els.progress.style.strokeDashoffset = 0;
     } else {
-      renderIdle();
+      setMode(false);
     }
+    renderTotals();
+    els.start.disabled = buildPlan().length === 0;
   }
 
   function tick() {
@@ -260,14 +270,12 @@
     const { plan, startAt, out } = session;
     const a = audio;
 
-    // queue upcoming strikes into the audio timeline
     while (session.queued < plan.length && startAt + plan[session.queued] <= now + LOOKAHEAD_MS) {
       const delay = Math.max(0.01, (startAt + plan[session.queued] - now) / 1000);
       strike(a, a.ctx.currentTime + delay, out);
       session.queued++;
     }
 
-    // visual: count strikes that have passed
     let fired = false;
     while (session.fired < plan.length && startAt + plan[session.fired] <= now) {
       session.fired++;
@@ -282,7 +290,7 @@
 
     const total = plan[plan.length - 1];
     const elapsed = now - startAt;
-    const progress = total > 0 ? Math.min(1, Math.max(0, elapsed / total)) : 1;
+    const progress = total > 0 ? clamp(elapsed / total, 0, 1) : 1;
     els.progress.style.strokeDashoffset = RING_CIRC * (1 - progress);
 
     const untilNext = startAt + plan[session.fired] - now;
@@ -293,7 +301,7 @@
 
   function flash() {
     els.dial.classList.remove('hit');
-    void els.dial.offsetWidth;       // restart the animation
+    void els.dial.offsetWidth;
     els.dial.classList.add('hit');
   }
 
@@ -309,7 +317,7 @@
         wakeLock = null;
         await lock.release();
       }
-    } catch (_) { /* wake lock is optional */ }
+    } catch (_) { /* optional */ }
   }
 
   document.addEventListener('visibilitychange', () => {
@@ -318,30 +326,96 @@
     if (audio && audio.ctx.state === 'suspended') audio.ctx.resume().catch(() => {});
   });
 
-  // ---------- rendering ----------
+  // ---------- time wheels ----------
+  // Each wheel is a scroll-snap list. The item under the middle band is the value.
+  const wheelSetters = {};
+  function buildWheel(unit, max) {
+    const wheel = els.wheels[unit];
+    const list = wheel.querySelector('.wheel-list');
+    list.innerHTML = Array.from({ length: max + 1 }, (_, i) =>
+      `<div class="wheel-item">${pad(i)}</div>`).join('');
+    let value = 0;
+    const mark = (v) => [...list.children].forEach((el, i) => el.classList.toggle('on', i === v));
+
+    list.addEventListener('scroll', () => {
+      const v = clamp(Math.round(list.scrollTop / WHEEL_ITEM_H), 0, max);
+      if (v === value) return;
+      value = v;
+      mark(v);
+      pick[unit] = v;
+      updateAddLabel();
+    }, { passive: true });
+
+    wheelSetters[unit] = (v) => {
+      value = v;
+      mark(v);
+      list.scrollTop = v * WHEEL_ITEM_H;
+    };
+  }
+  buildWheel('h', 23);
+  buildWheel('m', 59);
+  buildWheel('s', 59);
+
+  function renderPicker() {
+    wheelSetters.h(pick.h);
+    wheelSetters.m(pick.m);
+    wheelSetters.s(pick.s);
+    renderChips();
+  }
+
+  // ---------- gong count chips ----------
+  function buildChips() {
+    els.chips.innerHTML = Array.from({ length: MAX_STRIKES }, (_, i) => {
+      const n = i + 1;
+      return `<button class="chip-n" type="button" role="radio" data-n="${n}" aria-label="${n} gong${n > 1 ? 's' : ''}">${n}</button>`;
+    }).join('');
+  }
+  function renderChips() {
+    [...els.chips.children].forEach((btn) => {
+      const on = Number(btn.dataset.n) === pick.strikes;
+      btn.classList.toggle('on', on);
+      btn.setAttribute('aria-checked', String(on));
+    });
+  }
+  els.chips.addEventListener('click', (e) => {
+    const btn = e.target.closest('.chip-n');
+    if (!btn || isRunning()) return;
+    pick.strikes = Number(btn.dataset.n);
+    renderChips();
+    updateAddLabel();
+  });
+
+  // ---------- bells ----------
+  function updateAddLabel() {
+    if (editIndex !== null) {
+      els.add.textContent = 'Update bell';
+    } else {
+      els.add.textContent = '+ Add bell';
+    }
+    els.add.disabled = pickSecs() === 0 || (editIndex === null && state.steps.length >= MAX_STEPS);
+    els.cancel.hidden = editIndex === null;
+  }
+
   function renderRows() {
-    els.rows.innerHTML = state.steps.map((s, i) => `
-      <li class="row" data-i="${i}">
+    els.rows.innerHTML = state.steps.map((b, i) => `
+      <li class="row${i === editIndex ? ' editing' : ''}" data-i="${i}">
         <span class="badge">${i + 1}</span>
         <div class="row-main">
-          <div class="line">
+          <button class="time" data-act="edit" type="button" aria-label="Edit bell ${i + 1}">
             <span class="lbl">${i === 0 ? 'Starts after' : 'Then after'}</span>
-            <input class="num" data-k="min" type="number" inputmode="numeric" min="0" max="999" value="${s.min}" aria-label="Minutes">
-            <span class="unit">min</span>
-            <input class="num" data-k="sec" type="number" inputmode="numeric" min="0" max="59" value="${s.sec}" aria-label="Seconds">
-            <span class="unit">sec</span>
-          </div>
+            <strong>${hms(b.secs)}</strong>
+          </button>
           <div class="line">
-            <span class="lbl">Gongs</span>
             <button class="step" data-act="dec" type="button" aria-label="One fewer gong">−</button>
-            <span class="dots" aria-label="${s.strikes} gongs">${'<i></i>'.repeat(s.strikes)}</span>
+            <span class="dots" aria-label="${b.strikes} gongs">${'<i></i>'.repeat(b.strikes)}</span>
             <button class="step" data-act="inc" type="button" aria-label="One more gong">+</button>
+            <span class="unit">${b.strikes} gong${b.strikes === 1 ? '' : 's'}</span>
           </div>
         </div>
         <button class="del" data-act="del" type="button" aria-label="Remove bell">×</button>
       </li>`).join('');
-    els.add.disabled = state.steps.length >= MAX_STEPS;
     renderTotals();
+    updateAddLabel();
   }
 
   function renderTotals() {
@@ -353,15 +427,9 @@
   }
 
   function renderIdle() {
-    const plan = buildPlan();
-    const total = plan.length ? plan[plan.length - 1] : 0;
-    els.status.textContent = 'Ready';
-    els.countdown.textContent = fmt(total);
-    els.next.textContent = plan.length ? 'Total session length' : 'Add a bell to begin';
-    els.progress.style.strokeDashoffset = RING_CIRC;
-    els.start.disabled = plan.length === 0;
+    setMode(false);
+    els.start.disabled = buildPlan().length === 0;
     els.stop.disabled = true;
-    renderTotals();
   }
 
   function renderSound() {
@@ -373,21 +441,11 @@
     els.repOut.textContent = `${state.repeat}×`;
   }
 
-  // ---------- events ----------
-  els.rows.addEventListener('change', (e) => {
-    if (isRunning()) return;
-    const input = e.target.closest('input[data-k]');
-    const li = e.target.closest('li[data-i]');
-    if (!input || !li) return;
-    const i = Number(li.dataset.i);
-    const k = input.dataset.k;
-    const max = k === 'min' ? 999 : 59;
-    let v = parseInt(input.value, 10);
-    if (Number.isNaN(v)) v = 0;
-    state.steps[i][k] = Math.min(Math.max(v, 0), max);
-    save();
+  function stopEditing() {
+    editIndex = null;
+    updateAddLabel();
     renderRows();
-  });
+  }
 
   els.rows.addEventListener('click', (e) => {
     if (isRunning()) return;
@@ -395,23 +453,46 @@
     const li = e.target.closest('li[data-i]');
     if (!btn || !li) return;
     const i = Number(li.dataset.i);
-    const step = state.steps[i];
+    const bell = state.steps[i];
     switch (btn.dataset.act) {
-      case 'inc': step.strikes = Math.min(MAX_STRIKES, step.strikes + 1); break;
-      case 'dec': step.strikes = Math.max(1, step.strikes - 1); break;
-      case 'del': if (state.steps.length > 1) state.steps.splice(i, 1); break;
+      case 'edit': {
+        // load this bell into the picker so you can change it
+        editIndex = i;
+        pick = { h: Math.floor(bell.secs / 3600), m: Math.floor((bell.secs % 3600) / 60), s: bell.secs % 60, strikes: bell.strikes };
+        renderPicker();
+        renderRows();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+      case 'inc': bell.strikes = Math.min(MAX_STRIKES, bell.strikes + 1); break;
+      case 'dec': bell.strikes = Math.max(1, bell.strikes - 1); break;
+      case 'del':
+        if (state.steps.length > 1) {
+          state.steps.splice(i, 1);
+          if (editIndex === i) editIndex = null;
+          else if (editIndex !== null && editIndex > i) editIndex -= 1;
+        }
+        break;
     }
     save();
     renderRows();
   });
 
   els.add.addEventListener('click', () => {
-    if (isRunning() || state.steps.length >= MAX_STEPS) return;
-    const last = state.steps[state.steps.length - 1];
-    state.steps.push({ min: 15, sec: 0, strikes: Math.min(MAX_STRIKES, (last ? last.strikes : 0) + 1) });
+    if (isRunning() || pickSecs() === 0) return;
+    const bell = { secs: pickSecs(), strikes: pick.strikes };
+    if (editIndex !== null) {
+      state.steps[editIndex] = bell;
+      editIndex = null;
+    } else {
+      if (state.steps.length >= MAX_STEPS) return;
+      state.steps.push(bell);
+    }
     save();
     renderRows();
   });
+
+  els.cancel.addEventListener('click', () => stopEditing());
 
   els.volume.addEventListener('input', () => {
     state.volume = Number(els.volume.value);
@@ -424,14 +505,14 @@
     state.gap = Number(els.gap.value);
     els.gapOut.textContent = `${state.gap} s`;
     save();
-    if (!isRunning()) renderTotals();
+    renderTotals();
   });
 
   els.repeat.addEventListener('input', () => {
     state.repeat = Number(els.repeat.value);
     els.repOut.textContent = `${state.repeat}×`;
     save();
-    if (!isRunning()) { renderRows(); }
+    renderTotals();
   });
 
   els.start.addEventListener('click', start);
@@ -439,7 +520,9 @@
   els.test.addEventListener('click', testGong);
 
   // ---------- boot ----------
+  buildChips();
   renderSound();
+  renderPicker();
   renderRows();
   renderIdle();
 

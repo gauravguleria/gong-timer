@@ -24,7 +24,29 @@
     </header>
 
     <section class="dial-card">
-      <div id="dial" class="dial">
+      <!-- Idle: scroll the wheels to set the time -->
+      <div id="pickerWrap" class="picker-wrap">
+        <div class="picker" aria-label="Set the time">
+          <div class="wheel" data-unit="h">
+            <div class="wheel-list" aria-label="Hours"></div>
+          </div>
+          <span class="colon">:</span>
+          <div class="wheel" data-unit="m">
+            <div class="wheel-list" aria-label="Minutes"></div>
+          </div>
+          <span class="colon">:</span>
+          <div class="wheel" data-unit="s">
+            <div class="wheel-list" aria-label="Seconds"></div>
+          </div>
+          <div class="picker-band" aria-hidden="true"></div>
+        </div>
+        <div class="picker-labels">
+          <span>hours</span><span>minutes</span><span>seconds</span>
+        </div>
+      </div>
+
+      <!-- Running: countdown ring -->
+      <div id="dial" class="dial" hidden>
         <div class="glow"></div>
         <svg viewBox="0 0 200 200" aria-hidden="true">
           <circle class="track" cx="100" cy="100" r="88"/>
@@ -36,6 +58,7 @@
           <p id="nextInfo" class="next"></p>
         </div>
       </div>
+
       <div class="controls">
         <button id="startBtn" class="btn primary" type="button">Start</button>
         <button id="stopBtn" class="btn ghost" type="button" disabled>Stop</button>
@@ -44,11 +67,15 @@
 
     <section class="card editable">
       <div class="card-head">
-        <h2>Bell schedule</h2>
+        <h2>Gongs for this bell</h2>
         <span id="totalInfo" class="muted"></span>
       </div>
+      <div id="gongChips" class="chips" role="radiogroup" aria-label="Number of gongs"></div>
+      <div class="add-row">
+        <button id="addBtn" class="btn primary" type="button">+ Add bell</button>
+        <button id="cancelBtn" class="btn ghost small" type="button" hidden>Cancel</button>
+      </div>
       <ol id="rows" class="rows"></ol>
-      <button id="addBtn" class="btn outline" type="button">+ Add bell</button>
     </section>
 
     <section class="card">

@@ -326,6 +326,140 @@ input[type="range"] {
   accent-color: var(--gold);
 }
 
+[hidden] { display: none !important; }
+
+/* Time wheels (idle state, in place of the dial) */
+.picker-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: min(330px, 88vw);
+  height: 220px;
+}
+.wheel {
+  position: relative;
+  flex: 1;
+  height: 220px;
+  overflow: hidden;
+}
+.wheel-list {
+  height: 220px;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+  padding: 88px 0;              /* 2 items above and below the centre */
+  overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 30%, #000 70%, transparent);
+          mask-image: linear-gradient(to bottom, transparent, #000 30%, #000 70%, transparent);
+}
+.wheel-list::-webkit-scrollbar { display: none; }
+.wheel-item {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  scroll-snap-align: center;
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+.wheel-item.on {
+  color: var(--gold-2);
+  font-size: 34px;
+  font-weight: 600;
+  text-shadow: 0 0 16px rgba(224, 177, 90, 0.45);
+}
+.picker-band {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 50%;
+  height: 44px;
+  transform: translateY(-50%);
+  border-radius: 14px;
+  background: rgba(224, 177, 90, 0.1);
+  border: 1px solid rgba(224, 177, 90, 0.3);
+  pointer-events: none;
+}
+.colon {
+  font-size: 30px;
+  color: var(--gold);
+  padding-bottom: 4px;
+}
+.picker-labels {
+  display: flex;
+  width: min(330px, 88vw);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.picker-labels span { flex: 1; text-align: center; }
+
+/* Gong count chips */
+.chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 2px 12px;
+  scrollbar-width: none;
+}
+.chips::-webkit-scrollbar { display: none; }
+.chip-n {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chip-n.on {
+  color: #2a1a05;
+  border-color: transparent;
+  background: linear-gradient(135deg, #f7e3a1, #c9963b);
+  box-shadow: 0 6px 18px rgba(224, 177, 90, 0.3);
+}
+
+.add-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.add-row .btn { flex: 1; }
+.btn.small { flex: 0 0 auto; height: 52px; padding: 0 18px; }
+
+.time {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+.time strong {
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.row.editing { border-color: rgba(224, 177, 90, 0.6); }
+
 /* Locked while a session runs */
 .is-running .editable {
   opacity: 0.45;
