@@ -1,19 +1,22 @@
 (() => {
   'use strict';
 
-  const KEY = 'gong-timer-v2';
-  const MAX_STEPS = 20;
+  const KEY = 'gong-timer-v3';
+  const MAX_PARTS = 6;
   const MAX_STRIKES = 12;
+  const MINP = 15;              // shortest allowed part, seconds
   const LOOKAHEAD_MS = 20000;   // schedule audio this far ahead
   const RING_CIRC = 2 * Math.PI * 88;
   const WHEEL_ITEM_H = 44;      // must match .wheel-item height in styles.css
+  const COPIES = 9, MID = 4;    // wheels repeat their numbers so they loop forever
 
-  // A bell = { secs: delay before it rings (from the previous bell), strikes: gongs }
+  // total = whole time set on the dial; parts = how it is split, each with its own gongs
   const DEFAULTS = {
-    steps: [{ secs: 15 * 60, strikes: 1 }],
+    total: 15 * 60,
+    parts: [{ secs: 15 * 60, strikes: 1 }],
     volume: 100,   // percent, 10 to 300
-    gap: 6,        // seconds between strikes within one bell
-    repeat: 1,     // how many times the whole schedule runs
+    gap: 6,        // seconds between strikes within one part's gongs
+    repeat: 1,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -27,9 +30,8 @@
     start: $('startBtn'),
     stop: $('stopBtn'),
     test: $('testBtn'),
-    chips: $('gongChips'),
-    tabs: $('tabs'),
-    del: $('delBtn'),
+    partChips: $('partChips'),
+    parts: $('parts'),
     totals: $('totalInfo'),
     volume: $('volume'),
     volOut: $('volOut'),
@@ -47,23 +49,26 @@
   els.progress.style.strokeDasharray = RING_CIRC;
 
   let state = load();
-  let pick = { h: 0, m: 15, s: 0, strikes: 1 };  // what the picker currently shows
+  let pick = { h: 0, m: 15, s: 0 };   // what the wheels show
   let audio = null;     // { ctx, master, sample, ready }
   let session = null;   // { out, plan, startAt, queued, fired, timerId }
   let wakeLock = null;
   let starting = false;
-  let sel = 0;          // which duration is selected
+  let doneTimer = null;
 
   // ---------- storage ----------
   function load() {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(KEY)); } catch (_) { /* ignore */ }
     const s = { ...structuredClone(DEFAULTS), ...(saved || {}) };
-    if (!Array.isArray(s.steps) || !s.steps.length) s.steps = structuredClone(DEFAULTS.steps);
-    s.steps = s.steps.map((b) => ({
-      secs: Number.isFinite(b.secs) ? b.secs : (b.min || 0) * 60 + (b.sec || 0),
-      strikes: Math.min(MAX_STRIKES, Math.max(1, b.strikes || 1)),
-    }));
+    s.parts = (Array.isArray(s.parts) && s.parts.length ? s.parts : structuredClone(DEFAULTS.parts))
+      .slice(0, MAX_PARTS)
+      .map((p) => ({ secs: Math.max(0, Math.floor(p.secs) || 0), strikes: Math.min(MAX_STRIKES, Math.max(1, p.strikes || 1)) }));
+    const sum = s.parts.reduce((t, p) => t + p.secs, 0);
+    if (!(s.total > 0) || sum !== s.total) {
+      s.total = sum || DEFAULTS.total;
+      if (!sum) s.parts = structuredClone(DEFAULTS.parts);
+    }
     return s;
   }
   function save() {
@@ -82,20 +87,60 @@
     const sec = s % 60;
     return h ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
   }
-  const hms = (secs) => `${Math.floor(secs / 3600)}:${pad(Math.floor((secs % 3600) / 60))}:${pad(secs % 60)}`;
+  const fmtSecs = (secs) => fmt(secs * 1000);
   const pickSecs = () => pick.h * 3600 + pick.m * 60 + pick.s;
+  const maxParts = () => Math.max(1, Math.min(MAX_PARTS, Math.floor(state.total / MINP)));
 
-  // Every strike as milliseconds from Start. Each bell's delay counts from the previous bell.
+  // Every strike as milliseconds from Start. Part N's gongs ring when its time is up.
   function buildPlan() {
     const hits = [];
     let t = 0;
     for (let r = 0; r < state.repeat; r++) {
-      for (const b of state.steps) {
-        t += b.secs * 1000;
-        for (let k = 0; k < b.strikes; k++) hits.push(t + k * state.gap * 1000);
+      for (const p of state.parts) {
+        t += p.secs * 1000;
+        for (let k = 0; k < p.strikes; k++) hits.push(t + k * state.gap * 1000);
       }
     }
     return hits.sort((a, b) => a - b);
+  }
+
+  // ---------- splitting the total ----------
+  const sumBefore = (i) => state.parts.slice(0, i).reduce((t, p) => t + p.secs, 0);
+  const maxFor = (i) => state.total - sumBefore(i) - (state.parts.length - 1 - i) * MINP;
+
+  // keep every part within bounds and make the last part the remainder
+  function normalize() {
+    const n = state.parts.length;
+    for (let i = 0; i < n - 1; i++) {
+      state.parts[i].secs = clamp(state.parts[i].secs, MINP, Math.max(MINP, maxFor(i)));
+    }
+    state.parts[n - 1].secs = state.total - sumBefore(n - 1);
+  }
+
+  function equalSplit(n) {
+    const old = state.parts;
+    let base = Math.floor(state.total / n / MINP) * MINP;
+    if (base < MINP || base * (n - 1) > state.total - MINP) base = Math.floor(state.total / n);
+    state.parts = Array.from({ length: n }, (_, i) => ({
+      secs: base,
+      strikes: old[i] ? old[i].strikes : old[old.length - 1].strikes,
+    }));
+    normalize();
+  }
+
+  function setTotal(t) {
+    const oldTotal = state.total;
+    state.total = t;
+    const n = Math.min(state.parts.length, maxParts());
+    if (t === 0) { state.parts = state.parts.slice(0, 1); state.parts[0].secs = 0; return; }
+    state.parts = state.parts.slice(0, n);
+    if (oldTotal > 0) {
+      const ratio = t / oldTotal;   // keep the same proportions when the total changes
+      state.parts.forEach((p) => { p.secs = Math.max(MINP, Math.round((p.secs * ratio) / MINP) * MINP); });
+    } else {
+      state.parts.forEach((p) => { p.secs = Math.floor(t / n); });
+    }
+    normalize();
   }
 
   // ---------- audio ----------
@@ -155,6 +200,7 @@
     const plan = buildPlan();
     if (!plan.length) return;
 
+    clearTimeout(doneTimer);
     starting = true;
     const a = getAudio();
     await a.ready;
@@ -206,11 +252,18 @@
       els.countdown.textContent = '00:00';
       els.next.textContent = 'Session finished';
       els.progress.style.strokeDashoffset = 0;
+      els.start.disabled = false;
+      // go back to the wheels so a new session can be started
+      doneTimer = setTimeout(() => { if (!isRunning()) setMode(false); }, 3500);
     } else {
       setMode(false);
     }
+    updateStart();
     renderTotals();
-    renderTabs();
+  }
+
+  function updateStart() {
+    els.start.disabled = isRunning() || starting || state.total === 0;
   }
 
   function tick() {
@@ -275,32 +328,40 @@
     if (audio && audio.ctx.state === 'suspended') audio.ctx.resume().catch(() => {});
   });
 
-  // ---------- time wheels ----------
-  // Each wheel is a scroll-snap list. The item under the middle band is the value.
+  // ---------- time wheels (loop forever) ----------
   const wheelSetters = {};
   function buildWheel(unit, max) {
     const wheel = els.wheels[unit];
     const list = wheel.querySelector('.wheel-list');
-    list.innerHTML = Array.from({ length: max + 1 }, (_, i) =>
-      `<div class="wheel-item">${pad(i)}</div>`).join('');
-    let value = 0;
-    const mark = (v) => [...list.children].forEach((el, i) => el.classList.toggle('on', i === v));
+    const n = max + 1;
+    list.innerHTML = Array.from({ length: COPIES * n }, (_, i) =>
+      `<div class="wheel-item" data-v="${i % n}">${pad(i % n)}</div>`).join('');
+    const items = [...list.children];
+    let value = -1;
+    let settle = null;
+    const mark = (v) => items.forEach((el, i) => el.classList.toggle('on', i % n === v));
 
     list.addEventListener('scroll', () => {
-      const v = clamp(Math.round(list.scrollTop / WHEEL_ITEM_H), 0, max);
-      if (v === value) return;
-      value = v;
-      mark(v);
-      pick[unit] = v;
-      state.steps[sel].secs = pickSecs();
-      save();
-      renderTabs();
+      const idx = Math.round(list.scrollTop / WHEEL_ITEM_H);
+      const v = ((idx % n) + n) % n;
+      if (v !== value) {
+        value = v;
+        mark(v);
+        pick[unit] = v;
+        onWheelChange();
+      }
+      clearTimeout(settle);
+      settle = setTimeout(() => {
+        // after the wheel rests, jump back to the middle copy so it never runs out
+        const i = Math.round(list.scrollTop / WHEEL_ITEM_H);
+        if (i < n * 2 || i >= n * (COPIES - 2)) list.scrollTop = (MID * n + v) * WHEEL_ITEM_H;
+      }, 150);
     }, { passive: true });
 
     wheelSetters[unit] = (v) => {
       value = v;
       mark(v);
-      list.scrollTop = v * WHEEL_ITEM_H;
+      list.scrollTop = (MID * n + v) * WHEEL_ITEM_H;
     };
   }
   buildWheel('h', 23);
@@ -308,79 +369,114 @@
   buildWheel('s', 59);
 
   function renderPicker() {
+    pick = { h: Math.floor(state.total / 3600), m: Math.floor((state.total % 3600) / 60), s: state.total % 60 };
     wheelSetters.h(pick.h);
     wheelSetters.m(pick.m);
     wheelSetters.s(pick.s);
-    renderChips();
   }
 
-  // ---------- gong count chips ----------
-  function buildChips() {
-    els.chips.innerHTML = Array.from({ length: MAX_STRIKES }, (_, i) => {
+  function onWheelChange() {
+    if (isRunning()) return;
+    const t = pickSecs();
+    if (t === state.total) return;
+    setTotal(t);
+    save();
+    renderPartChips();
+    renderParts();
+    renderTotals();
+    updateStart();
+  }
+
+  // ---------- split into parts ----------
+  function renderPartChips() {
+    const max = maxParts();
+    els.partChips.innerHTML = Array.from({ length: MAX_PARTS }, (_, i) => {
       const n = i + 1;
-      return `<button class="chip-n" type="button" role="radio" data-n="${n}" aria-label="${n} gong${n > 1 ? 's' : ''}">${n}</button>`;
+      const on = n === state.parts.length;
+      return `<button class="chip-n${on ? ' on' : ''}" type="button" role="radio" aria-checked="${on}" data-n="${n}" ${n > max ? 'disabled' : ''}>${n}</button>`;
     }).join('');
   }
-  function renderChips() {
-    [...els.chips.children].forEach((btn) => {
-      const on = Number(btn.dataset.n) === pick.strikes;
-      btn.classList.toggle('on', on);
-      btn.setAttribute('aria-checked', String(on));
-    });
-  }
-  els.chips.addEventListener('click', (e) => {
+
+  els.partChips.addEventListener('click', (e) => {
     const btn = e.target.closest('.chip-n');
-    if (!btn || isRunning()) return;
-    pick.strikes = Number(btn.dataset.n);
-    state.steps[sel].strikes = pick.strikes;
+    if (!btn || btn.disabled || isRunning()) return;
+    const n = Number(btn.dataset.n);
+    if (n === state.parts.length) return;
+    equalSplit(n);
     save();
-    renderChips();
-    renderTabs();
-  });
-
-  // ---------- durations (tabs) ----------
-  // Each duration = a time (set on the wheels) + a number of gongs (chips).
-  function selectDuration(i) {
-    sel = clamp(i, 0, state.steps.length - 1);
-    const b = state.steps[sel];
-    pick = { h: Math.floor(b.secs / 3600), m: Math.floor((b.secs % 3600) / 60), s: b.secs % 60, strikes: b.strikes };
-    renderPicker();
-    renderTabs();
-  }
-
-  function renderTabs() {
-    els.tabs.innerHTML = state.steps.map((b, i) => `
-      <button class="tab${i === sel ? ' on' : ''}" data-i="${i}" type="button">
-        <span class="tab-n">${i === 0 ? 'First' : 'Then'} ${i + 1}</span>
-        <span class="tab-t">${hms(b.secs)} · ${b.strikes}×</span>
-      </button>`).join('') +
-      (state.steps.length < MAX_STEPS
-        ? '<button class="tab add" data-add="1" type="button" aria-label="Add duration">+</button>' : '');
-    els.del.hidden = state.steps.length < 2;
-    const el = els.tabs.querySelector('.tab.on');
-    if (el) el.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    renderPartChips();
+    renderParts();
     renderTotals();
-    els.start.disabled = isRunning() || !state.steps.every((b) => b.secs > 0);
-  }
-
-  els.tabs.addEventListener('click', (e) => {
-    if (isRunning()) return;
-    if (e.target.closest('[data-add]')) {
-      const last = state.steps[state.steps.length - 1];
-      state.steps.push({ secs: last ? last.secs : 15 * 60, strikes: last ? last.strikes : 1 });
-      save();
-      selectDuration(state.steps.length - 1);
-      return;
-    }
-    const t = e.target.closest('.tab[data-i]');
-    if (t) selectDuration(Number(t.dataset.i));
   });
 
-  els.del.addEventListener('click', () => {
-    if (isRunning() || state.steps.length < 2) return;
-    state.steps.splice(sel, 1);
+  function renderParts() {
+    const n = state.parts.length;
+    els.parts.innerHTML = state.parts.map((p, i) => {
+      const last = i === n - 1;
+      const timeLine = n === 1
+        ? `<div class="line"><span class="lbl">Rings after</span><strong class="pt" data-i="${i}"></strong></div>`
+        : last
+          ? `<div class="line"><span class="lbl">Part ${i + 1} · rest</span><strong class="pt" data-i="${i}"></strong></div>`
+          : `<div class="line"><span class="lbl">Part ${i + 1}</span><strong class="pt" data-i="${i}"></strong></div>
+             <div class="line slider-line">
+               <button class="step" data-act="tdec" type="button" aria-label="One minute less">−</button>
+               <input class="pslider" data-i="${i}" type="range" min="${MINP}" step="${MINP}">
+               <button class="step" data-act="tinc" type="button" aria-label="One minute more">+</button>
+             </div>`;
+      return `
+      <li class="row" data-i="${i}">
+        <span class="badge">${i + 1}</span>
+        <div class="row-main">
+          ${timeLine}
+          <div class="line">
+            <button class="step" data-act="dec" type="button" aria-label="One fewer gong">−</button>
+            <span class="dots" aria-label="${p.strikes} gongs">${'<i></i>'.repeat(p.strikes)}</span>
+            <button class="step" data-act="inc" type="button" aria-label="One more gong">+</button>
+            <span class="unit">${p.strikes} gong${p.strikes === 1 ? '' : 's'}</span>
+          </div>
+        </div>
+      </li>`;
+    }).join('');
+    updatePartTimes();
+  }
+
+  // update times and slider limits without rebuilding the rows (keeps a drag smooth)
+  function updatePartTimes() {
+    els.parts.querySelectorAll('.pt').forEach((el) => {
+      el.textContent = fmtSecs(state.parts[Number(el.dataset.i)].secs);
+    });
+    els.parts.querySelectorAll('.pslider').forEach((el) => {
+      const i = Number(el.dataset.i);
+      el.max = Math.max(MINP, maxFor(i));
+      el.value = state.parts[i].secs;
+    });
+    renderTotals();
+  }
+
+  els.parts.addEventListener('input', (e) => {
+    const el = e.target.closest('.pslider');
+    if (!el || isRunning()) return;
+    state.parts[Number(el.dataset.i)].secs = Number(el.value);
+    normalize();
     save();
-    selectDuration(Math.min(sel, state.steps.length - 1));
+    updatePartTimes();
+  });
+
+  els.parts.addEventListener('click', (e) => {
+    if (isRunning()) return;
+    const btn = e.target.closest('button[data-act]');
+    const li = e.target.closest('li[data-i]');
+    if (!btn || !li) return;
+    const i = Number(li.dataset.i);
+    const p = state.parts[i];
+    switch (btn.dataset.act) {
+      case 'tdec': p.secs = p.secs - 60; normalize(); save(); updatePartTimes(); return;
+      case 'tinc': p.secs = p.secs + 60; normalize(); save(); updatePartTimes(); return;
+      case 'inc': p.strikes = Math.min(MAX_STRIKES, p.strikes + 1); break;
+      case 'dec': p.strikes = Math.max(1, p.strikes - 1); break;
+    }
+    save();
+    renderParts();
   });
 
   function renderTotals() {
@@ -394,6 +490,7 @@
   function renderIdle() {
     setMode(false);
     els.stop.disabled = true;
+    updateStart();
   }
 
   function renderSound() {
@@ -404,6 +501,9 @@
     els.repeat.value = state.repeat;
     els.repOut.textContent = `${state.repeat}×`;
   }
+
+  // tap the finished dial to get the wheels back right away
+  els.dial.addEventListener('click', () => { if (!isRunning()) { clearTimeout(doneTimer); setMode(false); } });
 
   els.volume.addEventListener('input', () => {
     state.volume = Number(els.volume.value);
@@ -431,10 +531,11 @@
   els.test.addEventListener('click', testGong);
 
   // ---------- boot ----------
-  buildChips();
   renderSound();
   getAudio();            // start loading the gong right away
-  selectDuration(0);
+  renderPicker();
+  renderPartChips();
+  renderParts();
   renderIdle();
 
   if ('serviceWorker' in navigator) {

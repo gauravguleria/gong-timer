@@ -26,6 +26,7 @@
     <section class="dial-card">
       <!-- Idle: scroll the wheels to set the time -->
       <div id="pickerWrap" class="picker-wrap">
+        <p class="sub center">Total time</p>
         <div class="picker" aria-label="Set the time">
           <div class="wheel" data-unit="h">
             <div class="wheel-list" aria-label="Hours"></div>
@@ -67,13 +68,11 @@
 
     <section class="card editable">
       <div class="card-head">
-        <h2>Durations</h2>
+        <h2>Split the time into parts</h2>
         <span id="totalInfo" class="muted"></span>
       </div>
-      <div id="tabs" class="tabs"></div>
-      <h2 class="sub">Gongs for the selected duration</h2>
-      <div id="gongChips" class="chips" role="radiogroup" aria-label="Number of gongs"></div>
-      <button id="delBtn" class="btn ghost del-btn" type="button" hidden>Remove this duration</button>
+      <div id="partChips" class="chips" role="radiogroup" aria-label="Number of parts"></div>
+      <ol id="parts" class="rows"></ol>
     </section>
 
     <section class="card">
