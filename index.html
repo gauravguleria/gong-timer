@@ -67,15 +67,13 @@
 
     <section class="card editable">
       <div class="card-head">
-        <h2>Gongs for this bell</h2>
+        <h2>Durations</h2>
         <span id="totalInfo" class="muted"></span>
       </div>
+      <div id="tabs" class="tabs"></div>
+      <h2 class="sub">Gongs for the selected duration</h2>
       <div id="gongChips" class="chips" role="radiogroup" aria-label="Number of gongs"></div>
-      <div class="add-row">
-        <button id="addBtn" class="btn primary" type="button">+ Add bell</button>
-        <button id="cancelBtn" class="btn ghost small" type="button" hidden>Cancel</button>
-      </div>
-      <ol id="rows" class="rows"></ol>
+      <button id="delBtn" class="btn ghost del-btn" type="button" hidden>Remove this duration</button>
     </section>
 
     <section class="card">

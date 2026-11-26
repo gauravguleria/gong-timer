@@ -16,19 +16,6 @@
     repeat: 1,     // how many times the whole schedule runs
   };
 
-  // Synth gong, used only if sounds/gong.mp3 is missing.
-  // [ratio, level, decay seconds, attack seconds]
-  const PARTIALS = [
-    [1.00, 1.00, 24, 0.10],
-    [1.42, 0.55, 20, 0.14],
-    [1.98, 0.40, 16, 0.18],
-    [2.61, 0.28, 13, 0.22],
-    [3.12, 0.20, 10, 0.26],
-    [3.95, 0.13, 8, 0.30],
-    [4.84, 0.08, 6, 0.34],
-  ];
-  const BASE_HZ = 62;
-
   const $ = (id) => document.getElementById(id);
   const els = {
     pickerWrap: $('pickerWrap'),
@@ -41,9 +28,8 @@
     stop: $('stopBtn'),
     test: $('testBtn'),
     chips: $('gongChips'),
-    add: $('addBtn'),
-    cancel: $('cancelBtn'),
-    rows: $('rows'),
+    tabs: $('tabs'),
+    del: $('delBtn'),
     totals: $('totalInfo'),
     volume: $('volume'),
     volOut: $('volOut'),
@@ -62,10 +48,11 @@
 
   let state = load();
   let pick = { h: 0, m: 15, s: 0, strikes: 1 };  // what the picker currently shows
-  let editIndex = null;                            // bell being edited, or null
-  let audio = null;     // { ctx, master, noise, sample }
+  let audio = null;     // { ctx, master, sample, ready }
   let session = null;   // { out, plan, startAt, queued, fired, timerId }
   let wakeLock = null;
+  let starting = false;
+  let sel = 0;          // which duration is selected
 
   // ---------- storage ----------
   function load() {
@@ -112,6 +99,7 @@
   }
 
   // ---------- audio ----------
+  // Only your recorded gong (sounds/gong.mp3) is ever played.
   function getAudio() {
     if (!audio) {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -125,14 +113,8 @@
       limiter.release.value = 0.3;
       master.connect(limiter);
       limiter.connect(ctx.destination);
-
-      const len = Math.floor(ctx.sampleRate * 0.3);
-      const noise = ctx.createBuffer(1, len, ctx.sampleRate);
-      const data = noise.getChannelData(0);
-      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
-
-      audio = { ctx, master, noise, sample: null };
-      loadSample(ctx).then((buf) => { if (audio) audio.sample = buf; });
+      audio = { ctx, master, sample: null, ready: null };
+      audio.ready = loadSample(ctx).then((buf) => { audio.sample = buf; return buf; });
     }
     if (audio.ctx.state === 'suspended') audio.ctx.resume().catch(() => {});
     audio.master.gain.setTargetAtTime(state.volume / 100, audio.ctx.currentTime, 0.02);
@@ -150,66 +132,34 @@
   }
 
   function strike(a, when, out) {
-    const { ctx, noise } = a;
-
-    if (a.sample) {
-      const src = ctx.createBufferSource();
-      src.buffer = a.sample;
-      src.connect(out);
-      src.start(when);
-      return;
-    }
-
-    const warm = ctx.createBiquadFilter();
-    warm.type = 'lowpass';
-    warm.frequency.value = 2400;
-    warm.Q.value = 0.4;
-    warm.connect(out);
-
-    PARTIALS.forEach(([ratio, level, decay, attack], i) => {
-      for (const detune of [-0.7, 0.7]) {
-        const osc = ctx.createOscillator();
-        const env = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = BASE_HZ * ratio + detune * (1 + i * 0.2);
-        env.gain.setValueAtTime(0.0001, when);
-        env.gain.linearRampToValueAtTime(level * 0.12, when + attack);
-        env.gain.exponentialRampToValueAtTime(0.0001, when + decay);
-        osc.connect(env).connect(warm);
-        osc.start(when);
-        osc.stop(when + decay + 0.05);
-      }
-    });
-
-    const src = ctx.createBufferSource();
-    src.buffer = noise;
-    const band = ctx.createBiquadFilter();
-    band.type = 'bandpass';
-    band.frequency.value = 380;
-    band.Q.value = 0.6;
-    const env = ctx.createGain();
-    env.gain.setValueAtTime(0.25, when);
-    env.gain.exponentialRampToValueAtTime(0.0001, when + 0.25);
-    src.connect(band).connect(env).connect(out);
+    if (!a.sample) return;
+    const src = a.ctx.createBufferSource();
+    src.buffer = a.sample;
+    src.connect(out);
     src.start(when);
-    src.stop(when + 0.3);
   }
 
-  function testGong() {
+  async function testGong() {
     const a = getAudio();
+    await a.ready;
+    if (!a.sample) { els.next.textContent = 'Gong sound file not found'; return; }
     const out = a.ctx.createGain();
     out.connect(a.master);
     strike(a, a.ctx.currentTime + 0.05, out);
-    setTimeout(() => out.disconnect(), 14000);
+    setTimeout(() => out.disconnect(), 12000);
   }
 
   // ---------- session ----------
-  function start() {
-    if (isRunning()) return;
+  async function start() {
+    if (isRunning() || starting) return;
     const plan = buildPlan();
     if (!plan.length) return;
 
+    starting = true;
     const a = getAudio();
+    await a.ready;
+    starting = false;
+    if (!a.sample) { alert('Gong sound file (sounds/gong.mp3) was not found.'); return; }
     const out = a.ctx.createGain();
     out.connect(a.master);
 
@@ -248,7 +198,6 @@
 
   function finishUi(completed) {
     document.body.classList.remove('is-running');
-    els.start.disabled = false;
     els.stop.disabled = true;
     keepAwake(false);
     els.dial.classList.remove('hit');
@@ -261,7 +210,7 @@
       setMode(false);
     }
     renderTotals();
-    els.start.disabled = buildPlan().length === 0;
+    renderTabs();
   }
 
   function tick() {
@@ -343,7 +292,9 @@
       value = v;
       mark(v);
       pick[unit] = v;
-      updateAddLabel();
+      state.steps[sel].secs = pickSecs();
+      save();
+      renderTabs();
     }, { passive: true });
 
     wheelSetters[unit] = (v) => {
@@ -381,42 +332,56 @@
     const btn = e.target.closest('.chip-n');
     if (!btn || isRunning()) return;
     pick.strikes = Number(btn.dataset.n);
+    state.steps[sel].strikes = pick.strikes;
+    save();
     renderChips();
-    updateAddLabel();
+    renderTabs();
   });
 
-  // ---------- bells ----------
-  function updateAddLabel() {
-    if (editIndex !== null) {
-      els.add.textContent = 'Update bell';
-    } else {
-      els.add.textContent = '+ Add bell';
-    }
-    els.add.disabled = pickSecs() === 0 || (editIndex === null && state.steps.length >= MAX_STEPS);
-    els.cancel.hidden = editIndex === null;
+  // ---------- durations (tabs) ----------
+  // Each duration = a time (set on the wheels) + a number of gongs (chips).
+  function selectDuration(i) {
+    sel = clamp(i, 0, state.steps.length - 1);
+    const b = state.steps[sel];
+    pick = { h: Math.floor(b.secs / 3600), m: Math.floor((b.secs % 3600) / 60), s: b.secs % 60, strikes: b.strikes };
+    renderPicker();
+    renderTabs();
   }
 
-  function renderRows() {
-    els.rows.innerHTML = state.steps.map((b, i) => `
-      <li class="row${i === editIndex ? ' editing' : ''}" data-i="${i}">
-        <span class="badge">${i + 1}</span>
-        <div class="row-main">
-          <button class="time" data-act="edit" type="button" aria-label="Edit bell ${i + 1}">
-            <span class="lbl">${i === 0 ? 'Starts after' : 'Then after'}</span>
-            <strong>${hms(b.secs)}</strong>
-          </button>
-          <div class="line">
-            <button class="step" data-act="dec" type="button" aria-label="One fewer gong">−</button>
-            <span class="dots" aria-label="${b.strikes} gongs">${'<i></i>'.repeat(b.strikes)}</span>
-            <button class="step" data-act="inc" type="button" aria-label="One more gong">+</button>
-            <span class="unit">${b.strikes} gong${b.strikes === 1 ? '' : 's'}</span>
-          </div>
-        </div>
-        <button class="del" data-act="del" type="button" aria-label="Remove bell">×</button>
-      </li>`).join('');
+  function renderTabs() {
+    els.tabs.innerHTML = state.steps.map((b, i) => `
+      <button class="tab${i === sel ? ' on' : ''}" data-i="${i}" type="button">
+        <span class="tab-n">${i === 0 ? 'First' : 'Then'} ${i + 1}</span>
+        <span class="tab-t">${hms(b.secs)} · ${b.strikes}×</span>
+      </button>`).join('') +
+      (state.steps.length < MAX_STEPS
+        ? '<button class="tab add" data-add="1" type="button" aria-label="Add duration">+</button>' : '');
+    els.del.hidden = state.steps.length < 2;
+    const el = els.tabs.querySelector('.tab.on');
+    if (el) el.scrollIntoView({ inline: 'nearest', block: 'nearest' });
     renderTotals();
-    updateAddLabel();
+    els.start.disabled = isRunning() || !state.steps.every((b) => b.secs > 0);
   }
+
+  els.tabs.addEventListener('click', (e) => {
+    if (isRunning()) return;
+    if (e.target.closest('[data-add]')) {
+      const last = state.steps[state.steps.length - 1];
+      state.steps.push({ secs: last ? last.secs : 15 * 60, strikes: last ? last.strikes : 1 });
+      save();
+      selectDuration(state.steps.length - 1);
+      return;
+    }
+    const t = e.target.closest('.tab[data-i]');
+    if (t) selectDuration(Number(t.dataset.i));
+  });
+
+  els.del.addEventListener('click', () => {
+    if (isRunning() || state.steps.length < 2) return;
+    state.steps.splice(sel, 1);
+    save();
+    selectDuration(Math.min(sel, state.steps.length - 1));
+  });
 
   function renderTotals() {
     const plan = buildPlan();
@@ -428,7 +393,6 @@
 
   function renderIdle() {
     setMode(false);
-    els.start.disabled = buildPlan().length === 0;
     els.stop.disabled = true;
   }
 
@@ -440,59 +404,6 @@
     els.repeat.value = state.repeat;
     els.repOut.textContent = `${state.repeat}×`;
   }
-
-  function stopEditing() {
-    editIndex = null;
-    updateAddLabel();
-    renderRows();
-  }
-
-  els.rows.addEventListener('click', (e) => {
-    if (isRunning()) return;
-    const btn = e.target.closest('button[data-act]');
-    const li = e.target.closest('li[data-i]');
-    if (!btn || !li) return;
-    const i = Number(li.dataset.i);
-    const bell = state.steps[i];
-    switch (btn.dataset.act) {
-      case 'edit': {
-        // load this bell into the picker so you can change it
-        editIndex = i;
-        pick = { h: Math.floor(bell.secs / 3600), m: Math.floor((bell.secs % 3600) / 60), s: bell.secs % 60, strikes: bell.strikes };
-        renderPicker();
-        renderRows();
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-        return;
-      }
-      case 'inc': bell.strikes = Math.min(MAX_STRIKES, bell.strikes + 1); break;
-      case 'dec': bell.strikes = Math.max(1, bell.strikes - 1); break;
-      case 'del':
-        if (state.steps.length > 1) {
-          state.steps.splice(i, 1);
-          if (editIndex === i) editIndex = null;
-          else if (editIndex !== null && editIndex > i) editIndex -= 1;
-        }
-        break;
-    }
-    save();
-    renderRows();
-  });
-
-  els.add.addEventListener('click', () => {
-    if (isRunning() || pickSecs() === 0) return;
-    const bell = { secs: pickSecs(), strikes: pick.strikes };
-    if (editIndex !== null) {
-      state.steps[editIndex] = bell;
-      editIndex = null;
-    } else {
-      if (state.steps.length >= MAX_STEPS) return;
-      state.steps.push(bell);
-    }
-    save();
-    renderRows();
-  });
-
-  els.cancel.addEventListener('click', () => stopEditing());
 
   els.volume.addEventListener('input', () => {
     state.volume = Number(els.volume.value);
@@ -522,8 +433,8 @@
   // ---------- boot ----------
   buildChips();
   renderSound();
-  renderPicker();
-  renderRows();
+  getAudio();            // start loading the gong right away
+  selectDuration(0);
   renderIdle();
 
   if ('serviceWorker' in navigator) {
